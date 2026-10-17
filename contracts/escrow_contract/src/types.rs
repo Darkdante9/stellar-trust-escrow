@@ -39,6 +39,34 @@ pub enum EscrowStatus {
 //   0x08  Released  — funds transferred to freelancer
 //   0x10  Rejected  — client rejected; freelancer should resubmit
 //   0x20  Disputed  — dispute raised; funds frozen
+//
+// # Ledger constraints for milestone lookup scalability
+//
+// Milestone lookups are bounded by the following ledger assumptions. They are
+// documented here so that any change to the encoding or lookup strategy can be
+// checked against them.
+//
+// 1. **TTL assumptions** — Milestone entries are persisted under
+//    `storage::PackedDataKey::Milestone` (see `storage.rs`, layout version
+//    `storage::STORAGE_VERSION`). Persistent entries are kept alive via
+//    `ContractStorage::bump_persistent_ttl`; a lookup must be re-bumped within
+//    the persistent TTL window or the entry is archived and the lookup fails
+//    until it is restored. Lookups never assume an entry is live without a
+//    bump on the read path.
+//
+// 2. **Transaction-size assumptions** — `MAX_MILESTONES = 20` caps the number
+//    of milestones per escrow, so a full scan of an escrow's milestones stays
+//    within Soroban transaction size limits. The compact `u32` status encoding
+//    keeps each serialized entry small and predictable.
+//
+// 3. **Fee assumptions** — Each persisted milestone entry carries a per-entry
+//    rent reserve (`RENT_RESERVE_PER_ENTRY`), and completion is checked with an
+//    O(1) counter rather than a full scan. Together these keep the resource
+//    fees of a lookup bounded and predictable regardless of escrow size.
+//
+// 4. **Ledger-time assumptions** — Milestone timestamps are taken from
+//    `env.ledger().timestamp()` and are therefore monotonic across ledgers.
+//    Lookups never compare timestamps taken from different sources.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Compact bitflag type for milestone lifecycle state.
@@ -244,6 +272,19 @@ pub struct MultisigConfig {
 /// # Storage layout
 /// `status` is stored as a compact `u32` bitflag (see `MS_*` constants)
 /// rather than a tagged-union enum, saving ~36 bytes per milestone entry.
+/// Entries are persisted under `storage::PackedDataKey::Milestone` and are
+/// subject to `storage::STORAGE_VERSION` layout rules.
+///
+/// # Ledger constraints (lookup scalability)
+/// - **TTL**: persistent entries must be re-bumped via
+///   `ContractStorage::bump_persistent_ttl` within the persistent TTL window;
+///   an archived entry cannot be looked up until restored.
+/// - **Transaction size**: at most `MAX_MILESTONES = 20` milestones exist per
+///   escrow, so a full lookup fits within Soroban transaction size limits.
+/// - **Fees**: each entry reserves `RENT_RESERVE_PER_ENTRY` rent, and
+///   completion is tracked with an O(1) counter, keeping lookup fees bounded.
+/// - **Ledger time**: `submitted_at` / `resolved_at` are set from
+///   `env.ledger().timestamp()` and are monotonic across ledgers.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Milestone {
@@ -359,6 +400,13 @@ pub struct EscrowState {
     pub status: EscrowStatus,
 
     /// Ordered list of milestones.
+    ///
+    /// Lookups are bounded by the ledger constraints documented on
+    /// [`Milestone`]: entries live under `storage::PackedDataKey::Milestone`
+    /// and need `ContractStorage::bump_persistent_ttl` within the persistent
+    /// TTL window, the list is capped at `MAX_MILESTONES = 20` to stay within
+    /// transaction size limits, each entry reserves `RENT_RESERVE_PER_ENTRY`
+    /// rent, and milestone timestamps come from `env.ledger().timestamp()`.
     /// TODO (contributor): consider using a map keyed by milestone_id for O(1) lookup
     pub milestones: soroban_sdk::Vec<Milestone>,
 
